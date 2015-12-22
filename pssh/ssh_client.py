@@ -24,6 +24,9 @@ if 'threading' in sys.modules:
 import gevent
 from gevent import monkey
 monkey.patch_all()
+import socket
+from select import select
+import libssh2
 import logging
 import paramiko
 import os
@@ -183,7 +186,8 @@ class SSHClient(object):
             logger.error(msg)
             raise SSHException(msg, host, port)
 
-    def exec_command(self, command, sudo=False, user=None, **kwargs):
+    def exec_command(self, command, sudo=False, user=None,
+                     **kwargs):
         """Wrapper to :mod:`paramiko.SSHClient.exec_command`
         
         Opens a new SSH session with a new pty and runs command with given \
@@ -338,3 +342,62 @@ class SSHClient(object):
         else:
             logger.info("Copied local file %s to remote destination %s:%s",
                         local_file, self.host, remote_file)
+
+
+class _SSHClient(object):
+    """Low level libssh2 using SSH client"""
+
+    LIBSSH2_ERROR_EAGAIN = -37
+
+    def __init__(self, host, user, password=None, port=22,
+                 pkey=None, forward_ssh_agent=True,
+                 num_retries=DEFAULT_RETRIES):
+        self.host = host
+        self.user = user
+        self.password = password
+        self.port = port
+        self.pkey = pkey
+        self.forward_ssh_agent = forward_ssh_agent
+        self.num_retries = num_retries
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.connect()
+
+    def connect(self):
+        self.sock.connect_ex((self.host, self.port))
+        self.session = libssh2.Session()
+        self.session.startup(self.sock)
+        self.session.userauth_agent(self.user)
+
+    def _run_with_retries(self, func, count=0, *args, **kwargs):
+        while func(*args, **kwargs) == self.LIBSSH2_ERROR_EAGAIN:
+            if count > self.num_retries:
+                raise AuthenticationException(
+                    "Error authenticating %s@%s", self.user, self.host,)
+            count += 1
+
+    def get_transport(self):
+        return self.session
+
+    def execute(self, channel, cmd):
+        channel.execute(cmd)
+        remainder = ""
+        while not channel.eof():
+            _size, _data = channel.read_ex()
+            if not _data:
+                break
+            _pos = 0
+            _data = remainder + _data
+            while _pos < _size:
+                linesep = _data.find(os.linesep, _pos)
+                if linesep > 0:
+                    yield _data[_pos:linesep]
+                    _pos = linesep + 1
+                else:
+                    remainder = _data[_pos:]
+                    break
+        channel.close()
+
+    def __del__(self):
+        self.session.close()
+
+# list(client.execute(client.session.open_session(), 'ls -ltrh'))
