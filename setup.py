@@ -14,6 +14,11 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 from setuptools import setup, find_packages
+import sys
+
+convert_2_to_3 = {}
+if sys.version_info >= (3,):
+    convert_2_to_3['use_2to3'] = True
 
 setup(name='parallel-ssh',
       version='0.80.6',
@@ -34,4 +39,5 @@ setup(name='parallel-ssh',
         'Operating System :: POSIX :: Linux',
         'Operating System :: POSIX :: BSD',
         ],
+        **convert_2_to_3
       )
