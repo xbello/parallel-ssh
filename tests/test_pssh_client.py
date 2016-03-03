@@ -24,6 +24,7 @@ from pssh import ParallelSSHClient, UnknownHostException, \
      AuthenticationException, ConnectionErrorException, SSHException, logger as pssh_logger
 from embedded_server.embedded_server import start_server, make_socket, \
      logger as server_logger, paramiko_logger
+from embedded_server.fake_agent import FakeAgent
 import random
 import logging
 import gevent
@@ -51,28 +52,28 @@ class ParallelSSHClientTest(unittest.TestCase):
         self.listen_socket = make_socket(self.host)
         self.listen_port = self.listen_socket.getsockname()[1]
         self.server = start_server(self.listen_socket)
-
+        self.agent = FakeAgent()
+        self.agent.add_key(USER_KEY)
+        self.client = ParallelSSHClient([self.host], port=self.listen_port,
+                                        pkey=self.user_key,
+                                        agent=self.agent)
+    
     def tearDown(self):
         del self.server
         del self.listen_socket
+        del self.client
             
     def test_pssh_client_exec_command(self):
-        client = ParallelSSHClient([self.host], port=self.listen_port,
-                                   pkey=self.user_key)
-        cmd = client.exec_command(self.fake_cmd)[0]
-        output = client.get_stdout(cmd)
-        expected = {self.host : {'exit_code' : 0}}
-        self.assertEqual(expected, output,
-                         msg="Got unexpected command output - %s" % (output,))
+        cmd = self.client.exec_command(self.fake_cmd)[0]
+        output = self.client.get_stdout(cmd)
+        self.assertTrue(self.host in output,
+                        msg="No output for host")
         self.assertTrue(output[self.host]['exit_code'] == 0)
 
-    def test_pssh_client_no_stdout_non_zero_exit_code(self):
-        client = ParallelSSHClient([self.host], port=self.listen_port,
-                                   pkey=self.user_key)
-        output = client.run_command('exit 1')
+    def test_pssh_client_no_stdout_non_zero_exit_code_immediate_exit(self):
+        output = self.client.run_command('exit 1')
         expected_exit_code = 1
         exit_code = output[self.host]['exit_code']
-        client.pool.join()
         self.assertEqual(expected_exit_code, exit_code,
                          msg="Got unexpected exit code - %s, expected %s" %
                          (exit_code,
@@ -80,7 +81,8 @@ class ParallelSSHClientTest(unittest.TestCase):
 
     def test_pssh_client_exec_command_get_buffers(self):
         client = ParallelSSHClient([self.host], port=self.listen_port,
-                                   pkey=self.user_key)
+                                   pkey=self.user_key,
+                                   agent=self.agent)
         cmd = client.exec_command(self.fake_cmd)[0]
         output = client.get_stdout(cmd, return_buffers=True)
         expected_exit_code = 0
@@ -104,7 +106,8 @@ class ParallelSSHClientTest(unittest.TestCase):
 
     def test_pssh_client_run_command_get_output(self):
         client = ParallelSSHClient([self.host], port=self.listen_port,
-                                   pkey=self.user_key)
+                                   pkey=self.user_key,
+                                   agent=self.agent)
         output = client.run_command(self.fake_cmd)
         expected_exit_code = 0
         expected_stdout = [self.fake_resp]
@@ -136,9 +139,9 @@ class ParallelSSHClientTest(unittest.TestCase):
         expected_exit_code = 0
         expected_stdout = [self.fake_resp]
         expected_stderr = []
-        exit_code = output[self.host]['exit_code']
         stdout = list(output[self.host]['stdout'])
         stderr = list(output[self.host]['stderr'])
+        exit_code = output[self.host]['exit_code']
         self.assertEqual(expected_exit_code, exit_code,
                          msg="Got unexpected exit code - %s, expected %s" %
                          (exit_code,
@@ -170,7 +173,8 @@ class ParallelSSHClientTest(unittest.TestCase):
         listen_port = listen_socket.getsockname()[1]
         server = start_server(listen_socket, fail_auth=True)
         client = ParallelSSHClient([self.host], port=listen_port,
-                                   pkey=self.user_key)
+                                   pkey=self.user_key,
+                                   agent=self.agent)
         cmd = client.exec_command(self.fake_cmd)[0]
         # Handle exception
         try:
@@ -191,9 +195,10 @@ class ParallelSSHClientTest(unittest.TestCase):
         client = ParallelSSHClient(hosts,
                                    port=self.listen_port,
                                    pkey=self.user_key,
-                                   )
+                                   agent=self.agent)
         output = client.run_command(self.fake_cmd,
                                     stop_on_errors=False)
+        client.join(output)
         self.assertTrue(hosts[0] in output,
                         msg="Successful host does not exist in output - output is %s" % (output,))
         self.assertTrue(hosts[1] in output,
@@ -258,15 +263,17 @@ class ParallelSSHClientTest(unittest.TestCase):
         server.join()
 
     def test_pssh_client_exec_command_password(self):
-        """Test password authentication. Fake server accepts any password
+        """Test password authentication. Embedded server accepts any password
         even empty string"""
         client = ParallelSSHClient([self.host], port=self.listen_port,
                                    password='')
         cmd = client.exec_command(self.fake_cmd)[0]
         output = client.get_stdout(cmd)
-        expected = {self.host : {'exit_code' : 0}}
-        self.assertEqual(expected, output,
-                         msg="Got unexpected command output - %s" % (output,))
+        self.assertTrue(self.host in output,
+                        msg="No output for host")
+        self.assertTrue(output[self.host]['exit_code'] == 0,
+                        msg="Expected exit code 0, got %s" % (
+                            output[self.host]['exit_code'],))
         del client
 
     def test_pssh_client_long_running_command(self):
@@ -371,22 +378,25 @@ class ParallelSSHClientTest(unittest.TestCase):
         shutil.rmtree(remote_test_path)
 
     def test_pssh_pool_size(self):
-        """Test pool size logic"""
+        """Test setting pool size to non default values"""
         hosts = ['host-%01d' % d for d in xrange(5)]
-        client = ParallelSSHClient(hosts)
-        expected, actual = len(hosts), client.pool.size
+        pool_size = 2
+        client = ParallelSSHClient(hosts, pool_size=pool_size)
+        expected, actual = pool_size, client.pool.size
         self.assertEqual(expected, actual,
                          msg="Expected pool size to be %s, got %s" % (
                              expected, actual,))
         hosts = ['host-%01d' % d for d in xrange(15)]
-        client = ParallelSSHClient(hosts)
+        pool_size = 5
+        client = ParallelSSHClient(hosts, pool_size=pool_size)
         expected, actual = client.pool_size, client.pool.size
         self.assertEqual(expected, actual,
                          msg="Expected pool size to be %s, got %s" % (
                              expected, actual,))
         hosts = ['host-%01d' % d for d in xrange(15)]
-        client = ParallelSSHClient(hosts, pool_size=len(hosts)+5)
-        expected, actual = len(hosts), client.pool.size
+        pool_size = len(hosts)+5
+        client = ParallelSSHClient(hosts, pool_size=pool_size)
+        expected, actual = pool_size, client.pool.size
         self.assertEqual(expected, actual,
                          msg="Expected pool size to be %s, got %s" % (
                              expected, actual,))
@@ -501,7 +511,8 @@ class ParallelSSHClientTest(unittest.TestCase):
         server = start_server(_socket, fail_auth=True)
         hosts = [self.host]
         client = ParallelSSHClient(hosts, port=port,
-                                   pkey=self.user_key)
+                                   pkey=self.user_key,
+                                   agent=self.agent)
         output = client.run_command(self.fake_cmd, stop_on_errors=False)
         client.pool.join()
         self.assertTrue('exception' in output[self.host],

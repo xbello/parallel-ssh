@@ -203,9 +203,8 @@ not match source %s" % (copied_file_data, test_file_data))
         agent = FakeAgent()
         agent.add_key(USER_KEY)
         client = SSHClient(self.host, port=self.listen_port,
-                           _agent=agent)
+                           agent=agent)
         channel, host, stdout, stderr = client.exec_command(self.fake_cmd)
-        channel.close()
         output = list(stdout)
         stderr = list(stderr)
         expected = [self.fake_resp]

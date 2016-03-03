@@ -21,7 +21,7 @@ if sys.version_info >= (3,):
     convert_2_to_3['use_2to3'] = True
 
 setup(name='parallel-ssh',
-      version='0.80.6',
+      version='0.80.8',
       description='Asynchronous parallel SSH library',
       author='Panos Kittenis',
       author_email='pkittenis@gmail.com',
@@ -35,6 +35,9 @@ setup(name='parallel-ssh',
         'Programming Language :: Python :: 2',
         'Programming Language :: Python :: 2.6',
         'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3',
+        'Programming Language :: Python :: 3.4',
+        'Programming Language :: Python :: 3.5',
         'Topic :: Utilities',
         'Operating System :: POSIX :: Linux',
         'Operating System :: POSIX :: BSD',

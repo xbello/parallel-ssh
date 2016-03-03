@@ -50,7 +50,8 @@ class ParallelSSHClient(object):
     def __init__(self, hosts,
                  user=None, password=None, port=None, pkey=None,
                  forward_ssh_agent=True, num_retries=DEFAULT_RETRIES, timeout=120,
-                 pool_size=10, proxy_host=None, proxy_port=22):
+                 pool_size=10, proxy_host=None, proxy_port=22,
+                 agent=None):
         """
         :param hosts: Hosts to connect to
         :type hosts: list(str)
@@ -162,6 +163,15 @@ UnknownHostException, ConnectionErrorException
         >>> import paramiko
         >>> client_key = paramiko.RSAKey.from_private_key_file('user.key')
         >>> client = ParallelSSHClient(['myhost1', 'myhost2'], pkey=client_key)
+
+        **Example with expression as host list**
+        
+        Any type of iterator may be used as host list, including generator and
+        list comprehension expressions.
+        
+        >>> hosts = ['dc1.myhost1', 'dc2.myhost2']
+        >>> client = ParallelSSHClient([h for h in hosts if h.find('dc1')])
+        >>> client.run_command(<..>)
         
         .. note ::
         
@@ -183,7 +193,7 @@ UnknownHostException, ConnectionErrorException
           
           Connection is terminated.
         """
-        self.pool_size = len(hosts) if len(hosts) < pool_size else pool_size
+        self.pool_size = pool_size
         self.pool = gevent.pool.Pool(size=self.pool_size)
         self.hosts = hosts
         self.user = user
@@ -196,19 +206,26 @@ UnknownHostException, ConnectionErrorException
         self.proxy_host, self.proxy_port = proxy_host, proxy_port
         # To hold host clients
         self.host_clients = dict((host, None) for host in hosts)
+        self.agent = agent
 
     def run_command(self, *args, **kwargs):
         """Run command on all hosts in parallel, honoring self.pool_size,
         and return output buffers.
-
+        
         This function will block until all commands have **started** and
-        then return immediately. Any connection and/or authentication exceptions
-        will be raised here and need catching.
-
+        then return immediately.
+        
+        Any connection and/or authentication exceptions will be raised here
+        and need catching _unless_ `run_command` is called with
+        `stop_on_errors=False`.
+        
         :param args: Positional arguments for command
         :type args: tuple
         :param sudo: (Optional) Run with sudo. Defaults to False
         :type sudo: bool
+        :param user: (Optional) User to run command as. Requires sudo access \
+        for that user from the logged in user account.
+        :type user: str
         :param stop_on_errors: (Optional) Raise exception on errors running command. \
         Defaults to True. With stop_on_errors set to False, exceptions are instead \
         added to output of `run_command`. See example usage below.
@@ -233,18 +250,20 @@ UnknownHostException, ConnectionErrorException
         
         >>> for host in output:
         >>>     for line in output[host]['stdout']: print line
-
+        
         *Get exit codes after command has finished*
-
+        
         >>> client.get_exit_codes(output)
         >>> for host in output:
         >>> ... print output[host]['exit_code']
         0
         0
         
-        *Wait for completion, no stdout printing*
+        *Wait for completion, no stdout/stderr*
         
         >>> client.join(output)
+        >>> print output[host]['exit_code']
+        0
         
         *Run with sudo*
         
@@ -317,7 +336,7 @@ future releases - use self.run_command instead", DeprecationWarning)
 
     def _exec_command(self, host, *args, **kwargs):
         """Make SSHClient, run command on host"""
-        if not self.host_clients[host]:
+        if not host in self.host_clients or not self.host_clients[host]:
             self.host_clients[host] = _SSHClient(host, user=self.user,
                                                 password=self.password,
                                                 port=self.port, pkey=self.pkey,
@@ -325,7 +344,8 @@ future releases - use self.run_command instead", DeprecationWarning)
                                                 num_retries=self.num_retries,
                                                 timeout=self.timeout,
                                                 proxy_host=self.proxy_host,
-                                                proxy_port=self.proxy_port)
+                                                proxy_port=self.proxy_port,
+                                                agent=self.agent)
         return self.host_clients[host].exec_command(*args, **kwargs)
 
     def get_output(self, cmd, output):
@@ -367,7 +387,8 @@ future releases - use self.run_command instead", DeprecationWarning)
             try:
                 host = ex.args[1]
             except IndexError:
-                logger.error("Got exception with no host argument - cannot update output data with %s", ex)
+                logger.error("Got exception with no host argument - "
+                             "cannot update output data with %s", ex)
                 raise ex
             self._update_host_output(output, host, None, None, None, None, cmd,
                                      exception=ex)
@@ -375,31 +396,39 @@ future releases - use self.run_command instead", DeprecationWarning)
         self._update_host_output(output, host, self._get_exit_code(channel),
                                  channel, stdout, stderr, cmd)
 
-    def _update_host_output(self, output, host, exit_code, channel, stdout, stderr, cmd,
-                            exception=None):
+    def _update_host_output(self, output, host, exit_code, channel, stdout,
+                            stderr, cmd, exception=None):
         """Update host output with given data"""
         if host in output:
             new_host = "_".join([host,
                                  ''.join(random.choice(
                                      string.ascii_lowercase + string.digits)
                                      for _ in xrange(8))])
-            logger.warning("Already have output for host %s - changing host key for %s to %s",
-                           host, host, new_host)
+            logger.warning("Already have output for host %s - changing host "
+                           "key for %s to %s", host, host, new_host)
             host = new_host
         output.setdefault(host, {})
         output[host].update({'exit_code' : exit_code,
                              'channel' : channel,
-                             'stdout' : stdout,
-                             'stderr' : stderr,
+                             'stdout' : self._read_buff_ex_code(stdout, output),
+                             'stderr' : self._read_buff_ex_code(stderr, output),
                              'cmd' : cmd,
                              'exception' : exception,})
-    
+
+    def _read_buff_ex_code(self, _buffer, output):
+        if _buffer:
+            for line in _buffer:
+                yield line
+        self.get_exit_codes(output)
+
     def join(self, output):
         """Block until all remote commands in output have finished
         and retrieve exit codes"""
         for host in output:
-            for line in output[host]['stdout']:
-                pass
+            stdout = output[host].get('stdout')
+            if stdout:
+                for _ in stdout:
+                    pass
         self.get_exit_codes(output)
     
     def get_exit_codes(self, output):
@@ -426,7 +455,7 @@ future releases - use self.run_command instead", DeprecationWarning)
 
     def _get_exit_code(self, channel):
         """Get exit code from channel if ready"""
-        if not channel.exit_status_ready():
+        if not channel or not channel.exit_status_ready():
             return
         channel.close()
         return channel.recv_exit_status()
