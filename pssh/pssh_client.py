@@ -31,7 +31,7 @@ import warnings
 import string
 import random
 from .constants import DEFAULT_RETRIES
-from .ssh_client import SSHClient
+from .ssh_client import SSHClient, _SSHClient
 
 
 host_logger = logging.getLogger('pssh.host_logger')
@@ -318,7 +318,7 @@ future releases - use self.run_command instead", DeprecationWarning)
     def _exec_command(self, host, *args, **kwargs):
         """Make SSHClient, run command on host"""
         if not self.host_clients[host]:
-            self.host_clients[host] = SSHClient(host, user=self.user,
+            self.host_clients[host] = _SSHClient(host, user=self.user,
                                                 password=self.password,
                                                 port=self.port, pkey=self.pkey,
                                                 forward_ssh_agent=self.forward_ssh_agent,
@@ -499,7 +499,7 @@ future releases - use self.run_command instead", DeprecationWarning)
     def _copy_file(self, host, local_file, remote_file, recurse=False):
         """Make sftp client, copy file"""
         if not self.host_clients[host]:
-            self.host_clients[host] = SSHClient(
+            self.host_clients[host] = _SSHClient(
                 host, user=self.user, password=self.password,
                 port=self.port, pkey=self.pkey,
                 forward_ssh_agent=self.forward_ssh_agent)

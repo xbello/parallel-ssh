@@ -30,11 +30,11 @@ import libssh2
 import logging
 import paramiko
 import os
+import pwd
 from socket import gaierror as sock_gaierror, error as sock_error
 from .exceptions import UnknownHostException, AuthenticationException, \
      ConnectionErrorException, SSHException
 from .constants import DEFAULT_RETRIES
-
 
 host_logger = logging.getLogger('pssh.host_logger')
 logger = logging.getLogger(__name__)
@@ -343,28 +343,41 @@ class SSHClient(object):
             logger.info("Copied local file %s to remote destination %s:%s",
                         local_file, self.host, remote_file)
 
+            
+class WrapperChannel(libssh2.Channel):
+
+    def __init__(self, _channel):
+        libssh2.Channel.__init__(self, _channel)
+
+    def exit_status_ready(self):
+        return True if self.exit_status() else False
+
+    def recv_exit_status(self):
+        return self.exit_status()
 
 class _SSHClient(object):
     """Low level libssh2 using SSH client"""
 
     LIBSSH2_ERROR_EAGAIN = -37
 
-    def __init__(self, host, user, password=None, port=22,
+    def __init__(self, host,
+                 user=None, password=None, port=None,
                  pkey=None, forward_ssh_agent=True,
-                 num_retries=DEFAULT_RETRIES):
+                 num_retries=DEFAULT_RETRIES, _agent=None, timeout=10,
+                 proxy_host=None, proxy_port=22):
         self.host = host
-        self.user = user
+        self.user = user if user else pwd.getpwuid(os.getuid()).pw_name
         self.password = password
-        self.port = port
+        self.port = port if port else 22
         self.pkey = pkey
         self.forward_ssh_agent = forward_ssh_agent
         self.num_retries = num_retries
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.session = libssh2.Session()
         self.connect()
 
     def connect(self):
         self.sock.connect_ex((self.host, self.port))
-        self.session = libssh2.Session()
         self.session.startup(self.sock)
         self.session.userauth_agent(self.user)
 
@@ -396,6 +409,11 @@ class _SSHClient(object):
                     remainder = _data[_pos:]
                     break
         channel.close()
+
+    def exec_command(self, command, sudo=False, user=None,
+                     **kwargs):
+        channel = self.session.open_session()
+        return WrapperChannel(channel), self.host, self.execute(channel, command), None
 
     def __del__(self):
         self.session.close()
