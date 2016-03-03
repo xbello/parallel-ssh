@@ -18,6 +18,9 @@
 
 """Package containing SSHClient class."""
 
+import greenify
+greenify.greenify()
+assert greenify.patch_lib('/usr/lib/x86_64-linux-gnu/libssh2.so')
 import sys
 if 'threading' in sys.modules:
     del sys.modules['threading']
@@ -36,6 +39,7 @@ from socket import gaierror as sock_gaierror, error as sock_error
 from .exceptions import UnknownHostException, AuthenticationException, \
      ConnectionErrorException, SSHException
 from .constants import DEFAULT_RETRIES
+# monkey.patch_select()
 
 host_logger = logging.getLogger('pssh.host_logger')
 logger = logging.getLogger(__name__)
@@ -363,11 +367,11 @@ class _SSHClient(object):
     """Low level libssh2 using SSH client"""
 
     LIBSSH2_ERROR_EAGAIN = -37
-
+    
     def __init__(self, host,
                  user=None, password=None, port=None,
                  pkey=None, forward_ssh_agent=True,
-                 num_retries=DEFAULT_RETRIES, _agent=None, timeout=10,
+                 num_retries=DEFAULT_RETRIES, agent=None, timeout=10,
                  proxy_host=None, proxy_port=22):
         self.host = host
         self.user = user if user else pwd.getpwuid(os.getuid()).pw_name
@@ -382,6 +386,8 @@ class _SSHClient(object):
 
     def connect(self):
         self.sock.connect_ex((self.host, self.port))
+        self.session.setblocking(1)
+        gevent.sleep(.3)
         self.session.startup(self.sock)
         self.session.userauth_agent(self.user)
 
@@ -399,6 +405,7 @@ class _SSHClient(object):
         channel.execute(cmd)
         remainder = ""
         while not channel.eof():
+            # self._wait_select()
             _size, _data = channel.read_ex()
             if not _data:
                 break
@@ -414,9 +421,27 @@ class _SSHClient(object):
                     break
         channel.close()
 
+    def _wait_select(self):
+        '''
+        Find out from libssh2 if its blocked on read or write and wait accordingly
+        Return immediately if libssh2 is not blocked
+        '''
+        blockdir = self.session.blockdirections()
+        if blockdir == 0:
+            # return if not blocked
+            return
+        readfds = [self.sock] if (blockdir & 01) else []
+        writefds = [self.sock] if (blockdir & 02) else []
+        select(readfds, writefds, [])
+        return
+    
     def exec_command(self, command, sudo=False, user=None,
                      **kwargs):
         channel = self.session.open_session()
+        while not channel:
+            self._wait_select()
+            channel = self.session.open_session()
+        # channel.setblocking = 0
         return WrapperChannel(channel), self.host, self.execute(channel, command), None
 
     def __del__(self):
