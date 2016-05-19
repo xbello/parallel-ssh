@@ -2,7 +2,7 @@
 
 # This file is part of parallel-ssh.
 
-# Copyright (C) 2015 Panos Kittenis
+# Copyright (C) 2014- Panos Kittenis
 
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -168,6 +168,7 @@ def _handle_ssh_connection(transport, fail_auth=False,
     except Exception:
         logger.exception("Error occured starting server")
         return
+    gevent.sleep(0)
     channel = transport.accept(20)
     if not channel:
         logger.error("Could not establish channel")

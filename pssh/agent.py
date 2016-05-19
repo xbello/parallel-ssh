@@ -16,24 +16,26 @@
 # Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
 
 
-"""Exceptions raised by parallel-ssh classes."""
+class SSHAgent(paramiko.agent.AgentSSH):
+    """:mod:`paramiko.agent.AgentSSH` compatible class for programmatically
+    supplying an SSH agent"""
 
+    def __init__(self):
+        self._conn = None
+        self.keys = []
+    
+    def add_key(self, key):
+        """Add key to agent.
+        :param key: Key to add
+        :type key: :mod:`paramiko.pkey.PKey`
+        """
+        self.keys.append(key)
 
-class UnknownHostException(Exception):
-    """Raised when a host is unknown (dns failure)"""
-    pass
+    def _connect(self, conn):
+        pass
 
+    def _close(self):
+        self._keys = []
 
-class ConnectionErrorException(Exception):
-    """Raised on error connecting (connection refused/timed out)"""
-    pass
-
-
-class AuthenticationException(Exception):
-    """Raised on authentication error (user/password/ssh key error)"""
-    pass
-
-
-class SSHException(Exception):
-    """Raised on SSHException error - error authenticating with SSH server"""
-    pass
+    def get_keys(self):
+        return tuple(self.keys)

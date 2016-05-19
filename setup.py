@@ -1,4 +1,4 @@
-# Copyright (C) 2015 Panos Kittenis
+# Copyright (C) 2014- Panos Kittenis
 
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -21,10 +21,10 @@ if sys.version_info >= (3,):
     convert_2_to_3['use_2to3'] = True
 
 setup(name='parallel-ssh',
-      version='0.80.8',
+      version='0.91.1',
       description='Asynchronous parallel SSH library',
       author='Panos Kittenis',
-      author_email='pkittenis@gmail.com',
+      author_email='22e889d8@opayq.com',
       url = "https://github.com/pkittenis/parallel-ssh",
       packages = find_packages('.', exclude=(
           'embedded_server', 'embedded_server.*')),

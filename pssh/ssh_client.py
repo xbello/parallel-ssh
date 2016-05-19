@@ -22,6 +22,7 @@ import greenify
 greenify.greenify()
 assert greenify.patch_lib('/usr/lib/x86_64-linux-gnu/libssh2.so')
 import sys
+from gevent import sleep
 if 'threading' in sys.modules:
     del sys.modules['threading']
 import gevent
@@ -39,7 +40,6 @@ from socket import gaierror as sock_gaierror, error as sock_error
 from .exceptions import UnknownHostException, AuthenticationException, \
      ConnectionErrorException, SSHException
 from .constants import DEFAULT_RETRIES
-# monkey.patch_select()
 
 host_logger = logging.getLogger('pssh.host_logger')
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class SSHClient(object):
                  user=None, password=None, port=None,
                  pkey=None, forward_ssh_agent=True,
                  num_retries=DEFAULT_RETRIES, agent=None, timeout=10,
-                 proxy_host=None, proxy_port=22):
+                 proxy_host=None, proxy_port=22, channel_timeout=None):
         """Connect to host honouring any user set configuration in ~/.ssh/config \
         or /etc/ssh/ssh_config
         
@@ -92,6 +92,9 @@ class SSHClient(object):
         :param proxy_port: (Optional) SSH port to use to login to proxy host if \
         set. Defaults to 22.
         :type proxy_port: int
+        :param channel_timeout: (Optional) Time in seconds before an SSH operation \
+        times out.
+        :type channel_timeout: int
         """
         ssh_config = paramiko.SSHConfig()
         _ssh_config_file = os.path.sep.join([os.path.expanduser('~'),
@@ -120,6 +123,7 @@ class SSHClient(object):
             self.client._agent = agent
         self.num_retries = num_retries
         self.timeout = timeout
+        self.channel_timeout = channel_timeout
         self.proxy_host, self.proxy_port = proxy_host, proxy_port
         self.proxy_client = None
         if self.proxy_host and self.proxy_port:
@@ -128,7 +132,7 @@ class SSHClient(object):
             self._connect_tunnel()
         else:
             self._connect(self.client, self.host, self.port)
-
+    
     def _connect_tunnel(self):
         """Connects to SSH server via an intermediate SSH tunnel server.
         client (me) -> tunnel (ssh server to proxy through) -> \
@@ -146,12 +150,14 @@ class SSHClient(object):
           proxy_channel = self.proxy_client.get_transport().\
             open_channel('direct-tcpip', (self.host, self.port,),
                         ('127.0.0.1', 0))
+          sleep(0)
           return self._connect(self.client, self.host, self.port, sock=proxy_channel)
         except channel_exception, ex:
           error_type = ex.args[1] if len(ex.args) > 1 else ex.args[0]
           raise ConnectionErrorException("Error connecting to host '%s:%s' - %s",
                                            self.host, self.port,
                                            str(error_type))
+    
     def _connect(self, client, host, port, sock=None, retries=1):
         """Connect to host
         
@@ -169,7 +175,7 @@ class SSHClient(object):
             logger.error("Could not resolve host '%s' - retry %s/%s",
                          self.host, retries, self.num_retries)
             while retries < self.num_retries:
-                gevent.sleep(5)
+                sleep(5)
                 return self._connect(client, host, port, sock=sock,
                                      retries=retries+1)
             raise UnknownHostException("Unknown host %s - %s - retry %s/%s",
@@ -179,7 +185,7 @@ class SSHClient(object):
             logger.error("Error connecting to host '%s:%s' - retry %s/%s",
                          self.host, self.port, retries, self.num_retries)
             while retries < self.num_retries:
-                gevent.sleep(5)
+                sleep(5)
                 return self._connect(client, host, port, sock=sock,
                                      retries=retries+1)
             error_type = ex.args[1] if len(ex.args) > 1 else ex.args[0]
@@ -197,12 +203,12 @@ class SSHClient(object):
             raise SSHException(msg, host, port)
 
     def exec_command(self, command, sudo=False, user=None,
-                     **kwargs):
+                     shell=None,
+                     use_shell=True, **kwargs):
         """Wrapper to :mod:`paramiko.SSHClient.exec_command`
         
-        Opens a new SSH session with a new pty and runs command with given \
-        `kwargs` if any. Greenlet then yields (sleeps) while waiting for \
-        command to finish executing or channel to close indicating the same.
+        Opens a new SSH session with a new pty and runs command before yielding 
+        the main gevent loop to allow other greenlets to execute.
         
         :param command: Shell command to execute
         :type command: str
@@ -220,24 +226,29 @@ class SSHClient(object):
         if self.forward_ssh_agent:
             agent_handler = paramiko.agent.AgentRequestHandler(channel)
         channel.get_pty()
-        # if self.timeout:
-        #     channel.settimeout(self.timeout)
+        if self.channel_timeout:
+            channel.settimeout(self.channel_timeout)
         _stdout, _stderr = channel.makefile('rb'), \
                            channel.makefile_stderr('rb')
         stdout, stderr = self._read_output_buffer(_stdout,), \
                          self._read_output_buffer(_stderr,
                                                   prefix='\t[err]')
+        for _char in ['\\', '"', '$', '`']:
+            command = command.replace(_char, '\%s' % (_char,))
+        shell = '$SHELL -c' if not shell else shell
+        _command = ''
         if sudo and not user:
-            command = 'sudo -S bash -c \'%s\'' % (command,)
+            _command = 'sudo -S '
         elif user:
-            command = 'sudo -u %s -S bash -c \'%s\'' % (
-                user, command,)
+            _command = 'sudo -u %s -S ' % (user,)
+        if use_shell:
+            _command += '%s "%s"' % (shell, command,)
         else:
-            command = 'bash -c \'%s\'' % (command,)
-        logger.debug("Running command %s on %s", command, self.host)
-        channel.exec_command(command, **kwargs)
+            _command += '"%s"' % (command,)
+        logger.debug("Running parsed command %s on %s", _command, self.host)
+        channel.exec_command(_command, **kwargs)
         logger.debug("Command started")
-        gevent.sleep(.2)
+        sleep(0)
         return channel, self.host, stdout, stderr
 
     def _read_output_buffer(self, output_buffer, prefix=''):

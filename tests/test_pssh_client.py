@@ -22,6 +22,7 @@
 import unittest
 from pssh import ParallelSSHClient, UnknownHostException, \
      AuthenticationException, ConnectionErrorException, SSHException, logger as pssh_logger
+from pssh.utils import load_private_key
 from embedded_server.embedded_server import start_server, make_socket, \
      logger as server_logger, paramiko_logger
 from embedded_server.fake_agent import FakeAgent
@@ -34,8 +35,8 @@ import os
 import warnings
 import shutil
 
-USER_KEY = paramiko.RSAKey.from_private_key_file(
-    os.path.sep.join([os.path.dirname(__file__), 'test_client_private_key']))
+PKEY_FILENAME = os.path.sep.join([os.path.dirname(__file__), 'test_client_private_key'])
+USER_KEY = paramiko.RSAKey.from_private_key_file(PKEY_FILENAME)
 
 server_logger.setLevel(logging.DEBUG)
 pssh_logger.setLevel(logging.DEBUG)
@@ -73,6 +74,7 @@ class ParallelSSHClientTest(unittest.TestCase):
     def test_pssh_client_no_stdout_non_zero_exit_code_immediate_exit(self):
         output = self.client.run_command('exit 1')
         expected_exit_code = 1
+        self.client.join(output)
         exit_code = output[self.host]['exit_code']
         self.assertEqual(expected_exit_code, exit_code,
                          msg="Got unexpected exit code - %s, expected %s" %
@@ -112,9 +114,9 @@ class ParallelSSHClientTest(unittest.TestCase):
         expected_exit_code = 0
         expected_stdout = [self.fake_resp]
         expected_stderr = []
-        exit_code = output[self.host]['exit_code']
         stdout = list(output[self.host]['stdout'])
         stderr = list(output[self.host]['stderr'])
+        exit_code = output[self.host]['exit_code']
         self.assertEqual(expected_exit_code, exit_code,
                          msg="Got unexpected exit code - %s, expected %s" %
                          (exit_code,
@@ -418,14 +420,51 @@ class ParallelSSHClientTest(unittest.TestCase):
         stdout = [list(output[k]['stdout']) for k in output]
         expected_stdout = [[self.fake_resp], [self.fake_resp]]
         self.assertEqual(len(hosts), len(output),
-                         msg="Did not get output from all hosts. Got output for \
-%s/%s hosts" % (len(output), len(hosts),))
+                         msg="Did not get output from all hosts. Got output for " \
+                         "%s/%s hosts" % (len(output), len(hosts),))
         self.assertEqual(expected_stdout, stdout,
                          msg="Did not get expected output from all hosts. \
                          Got %s - expected %s" % (stdout, expected_stdout,))
         del client
         del server2
-
+    
+    def test_pssh_hosts_iterator_hosts_modification(self):
+        """Test using iterator as host list and modifying host list in place"""
+        server2_socket = make_socket('127.0.0.2', port=self.listen_port)
+        server2_port = server2_socket.getsockname()[1]
+        server2 = start_server(server2_socket)
+        server3_socket = make_socket('127.0.0.3', port=self.listen_port)
+        server3_port = server3_socket.getsockname()[1]
+        server3 = start_server(server3_socket)
+        hosts = [self.host, '127.0.0.2']
+        client = ParallelSSHClient(iter(hosts),
+                                   port=self.listen_port,
+                                   pkey=self.user_key,
+                                   pool_size=1,
+                                   )
+        output = client.run_command(self.fake_cmd)
+        stdout = [list(output[k]['stdout']) for k in output]
+        expected_stdout = [[self.fake_resp], [self.fake_resp]]
+        self.assertEqual(len(hosts), len(output),
+                         msg="Did not get output from all hosts. Got output for " \
+                         "%s/%s hosts" % (len(output), len(hosts),))
+        # Run again without re-assigning host list, should do nothing
+        output = client.run_command(self.fake_cmd)
+        self.assertFalse(hosts[0] in output,
+                         msg="Expected no host output, got %s" % (output,))
+        self.assertFalse(output,
+                         msg="Expected empty output, got %s" % (output,))
+        # Re-assigning host list with new hosts should work
+        hosts = ['127.0.0.2', '127.0.0.3']
+        client.hosts = iter(hosts)
+        output = client.run_command(self.fake_cmd)
+        self.assertEqual(len(hosts), len(output),
+                         msg="Did not get output from all hosts. Got output for " \
+                         "%s/%s hosts" % (len(output), len(hosts),))
+        self.assertTrue(hosts[1] in output,
+                        msg="Did not get output for new host %s" % (hosts[1],))
+        del client, server2, server3
+    
     def test_ssh_proxy(self):
         """Test connecting to remote destination via SSH proxy
         client -> proxy -> destination
@@ -434,11 +473,13 @@ class ParallelSSHClientTest(unittest.TestCase):
         proxy_server_socket = make_socket('127.0.0.2')
         proxy_server_port = proxy_server_socket.getsockname()[1]
         proxy_server = start_server(proxy_server_socket)
+        gevent.sleep(2)
         client = ParallelSSHClient([self.host], port=self.listen_port,
                                    pkey=self.user_key,
                                    proxy_host='127.0.0.2',
                                    proxy_port=proxy_server_port
                                    )
+        gevent.sleep(2)
         output = client.run_command(self.fake_cmd)
         stdout = list(output[self.host]['stdout'])
         expected_stdout = [self.fake_resp]
@@ -474,7 +515,7 @@ class ParallelSSHClientTest(unittest.TestCase):
                          msg="Host list contains %s identical hosts, only got output for %s" % (
                              len(hosts), len(output.keys())))
         del _socket1, _socket2
-
+    
     def test_connection_error_exception(self):
         """Test that we get connection error exception in output with correct arguments"""
         self.server.kill()
@@ -502,7 +543,7 @@ class ParallelSSHClientTest(unittest.TestCase):
         else:
             raise Exception("Expected ConnectionErrorException")
         del _socket
-
+    
     def test_authentication_exception(self):
         """Test that we get authentication exception in output with correct arguments"""
         self.server.kill()
@@ -544,7 +585,7 @@ class ParallelSSHClientTest(unittest.TestCase):
                                    user='fakey', password='fakey',
                                    pkey=paramiko.RSAKey.generate(1024))
         output = client.run_command(self.fake_cmd, stop_on_errors=False)
-        gevent.sleep(.2)
+        gevent.sleep(1)
         client.pool.join()
         self.assertTrue('exception' in output[host],
                         msg="Got no exception for host %s - expected connection error" % (
@@ -562,3 +603,90 @@ class ParallelSSHClientTest(unittest.TestCase):
             raise Exception("Expected SSHException")
         server.kill()
         del _socket
+    
+    def test_multiple_single_quotes_in_cmd(self):
+        """Test that we can run a command with multiple single quotes"""
+        output = self.client.run_command("echo 'me' 'and me'")
+        stdout = list(output[self.host]['stdout'])
+        expected = 'me and me'
+        self.assertTrue(len(stdout)==1,
+                        msg="Got incorrect number of lines in output - %s" % (stdout,))
+        self.assertTrue(output[self.host]['exit_code'] == 0,
+                        msg="Error executing cmd with multiple single quotes - %s" % (
+                            stdout,))
+        self.assertEqual(expected, stdout[0],
+                         msg="Got unexpected output. Expected %s, got %s" % (
+                             expected, stdout[0],))
+    
+    def test_backtics_in_cmd(self):
+        """Test running command with backtics in it"""
+        output = self.client.run_command("out=`ls` && echo $out")
+        self.client.join(output)
+        self.assertTrue(output[self.host]['exit_code'] == 0,
+                        msg="Error executing cmd with backtics - error code %s" % (
+                            output[self.host]['exit_code'],))
+    
+    def test_multiple_shell_commands(self):
+        """Test running multiple shell commands in one go"""
+        output = self.client.run_command("echo me; echo and; echo me")
+        stdout = list(output[self.host]['stdout'])
+        expected = ["me", "and", "me"]
+        self.assertTrue(output[self.host]['exit_code'] == 0,
+                        msg="Error executing multiple shell cmds - error code %s" % (
+                            output[self.host]['exit_code'],))
+        self.assertEqual(expected, stdout,
+                         msg="Got unexpected output. Expected %s, got %s" % (
+                             expected, stdout,))
+    
+    def test_escaped_quotes(self):
+        """Test escaped quotes in shell variable are handled correctly"""
+        output = self.client.run_command('t="--flags=\\"this\\""; echo $t')
+        stdout = list(output[self.host]['stdout'])
+        expected = ['--flags="this"']
+        self.assertTrue(output[self.host]['exit_code'] == 0,
+                        msg="Error executing multiple shell cmds - error code %s" % (
+                            output[self.host]['exit_code'],))
+        self.assertEqual(expected, stdout,
+                         msg="Got unexpected output. Expected %s, got %s" % (
+                             expected, stdout,))
+
+    def test_host_config(self):
+        """Test per-host configuration functionality of ParallelSSHClient"""
+        hosts = ['127.0.0.%01d' % n for n in xrange(1,3)]
+        host_config = dict.fromkeys(hosts)
+        servers = []
+        user = 'overriden_user'
+        password = 'overriden_pass'
+        for host in hosts:
+            _socket = make_socket(host)
+            port = _socket.getsockname()[1]
+            host_config[host] = {}
+            host_config[host]['port'] = port
+            host_config[host]['user'] = user
+            host_config[host]['password'] = password
+            server = start_server(_socket, fail_auth=hosts.index(host))
+            servers.append((server, port))
+        pkey_data = load_private_key(PKEY_FILENAME)
+        host_config[hosts[0]]['private_key'] = pkey_data
+        client = ParallelSSHClient(hosts, host_config=host_config)
+        output = client.run_command(self.fake_cmd, stop_on_errors=False)
+        client.join(output)
+        for host in hosts:
+            self.assertTrue(host in output)
+        try:
+            raise output[hosts[1]]['exception']
+        except AuthenticationException, ex:
+            pass
+        else:
+            raise AssertionError("Expected AutnenticationException on host %s",
+                                 hosts[0])
+        self.assertFalse(output[hosts[1]]['exit_code'],
+                         msg="Execution failed on host %s" % (hosts[1],))
+        self.assertTrue(client.host_clients[hosts[0]].user == user,
+                        msg="Host config user override failed")
+        self.assertTrue(client.host_clients[hosts[0]].password == password,
+                        msg="Host config password override failed")
+        self.assertTrue(client.host_clients[hosts[0]].pkey == pkey_data,
+                        msg="Host config pkey override failed")
+        for (server, _) in servers:
+            server.kill()
