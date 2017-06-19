@@ -2,11 +2,8 @@ import unittest
 import os
 import logging
 
-# from pssh import logger as pssh_logger
-import pssh
 from embedded_server.embedded_server import start_server, make_socket, \
      logger as server_logger
-from embedded_server.fake_agent import FakeAgent
 from pssh.libssh2_client import SSHClient, logger as pssh_logger
 
 

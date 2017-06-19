@@ -17,7 +17,7 @@
 
 """LibSSH2 based SSH client package"""
 
-import socket
+
 import logging
 import os
 import pwd
@@ -25,6 +25,8 @@ from socket import gaierror as sock_gaierror, error as sock_error
 
 from gevent import sleep
 from gevent.select import select
+from gevent import socket
+from gevent.threadpool import ThreadPool
 import libssh2
 
 from .exceptions import UnknownHostException, AuthenticationException, \
@@ -77,6 +79,7 @@ class SSHClient(object):
         self.sock.setblocking(0)
         self.session = libssh2.Session()
         self.session.setblocking(0)
+        self.tp = ThreadPool(1)
         self.startup()
         self.auth()
         self.channel = self.open_channel()
@@ -86,7 +89,7 @@ class SSHClient(object):
 
     def _agent_auth(self):
         self.session.setblocking(1)
-        self.session.userauth_agent(self.user)
+        self.tp.apply(self.session.userauth_agent, args=(self.user,))
         self.session.setblocking(0)
 
     def _identity_auth(self):
