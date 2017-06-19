@@ -31,7 +31,7 @@ import warnings
 import string
 import random
 from .constants import DEFAULT_RETRIES
-from .ssh_client import SSHClient, _SSHClient
+from .ssh_client import SSHClient
 
 
 logger = logging.getLogger('pssh')

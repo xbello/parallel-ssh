@@ -22,12 +22,11 @@ import greenify
 greenify.greenify()
 assert greenify.patch_lib('/usr/lib/x86_64-linux-gnu/libssh2.so')
 import sys
-from gevent import sleep
 if 'threading' in sys.modules:
     del sys.modules['threading']
-import gevent
 from gevent import monkey
 monkey.patch_all()
+from gevent import sleep
 import socket
 from select import select
 import libssh2
@@ -361,101 +360,3 @@ class SSHClient(object):
         else:
             logger.info("Copied local file %s to remote destination %s:%s",
                         local_file, self.host, remote_file)
-
-            
-class WrapperChannel(libssh2.Channel):
-
-    def __init__(self, _channel):
-        libssh2.Channel.__init__(self, _channel)
-
-    def exit_status_ready(self):
-        return True if self.exit_status() else False
-
-    def recv_exit_status(self):
-        return self.exit_status()
-
-class _SSHClient(object):
-    """Low level libssh2 using SSH client"""
-
-    LIBSSH2_ERROR_EAGAIN = -37
-    
-    def __init__(self, host,
-                 user=None, password=None, port=None,
-                 pkey=None, forward_ssh_agent=True,
-                 num_retries=DEFAULT_RETRIES, agent=None, timeout=10,
-                 proxy_host=None, proxy_port=22):
-        self.host = host
-        self.user = user if user else pwd.getpwuid(os.getuid()).pw_name
-        self.password = password
-        self.port = port if port else 22
-        self.pkey = pkey
-        self.forward_ssh_agent = forward_ssh_agent
-        self.num_retries = num_retries
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.session = libssh2.Session()
-        self.connect()
-
-    def connect(self):
-        self.sock.connect_ex((self.host, self.port))
-        self.session.setblocking(1)
-        gevent.sleep(.3)
-        self.session.startup(self.sock)
-        self.session.userauth_agent(self.user)
-
-    def _run_with_retries(self, func, count=0, *args, **kwargs):
-        while func(*args, **kwargs) == self.LIBSSH2_ERROR_EAGAIN:
-            if count > self.num_retries:
-                raise AuthenticationException(
-                    "Error authenticating %s@%s", self.user, self.host,)
-            count += 1
-
-    def get_transport(self):
-        return self.session
-
-    def execute(self, channel, cmd):
-        channel.execute(cmd)
-        remainder = ""
-        while not channel.eof():
-            # self._wait_select()
-            _size, _data = channel.read_ex()
-            if not _data:
-                break
-            _pos = 0
-            _data = remainder + _data
-            while _pos < _size:
-                linesep = _data.find(os.linesep, _pos)
-                if linesep > 0:
-                    yield _data[_pos:linesep]
-                    _pos = linesep + 1
-                else:
-                    remainder = _data[_pos:]
-                    break
-        channel.close()
-
-    def _wait_select(self):
-        '''
-        Find out from libssh2 if its blocked on read or write and wait accordingly
-        Return immediately if libssh2 is not blocked
-        '''
-        blockdir = self.session.blockdirections()
-        if blockdir == 0:
-            # return if not blocked
-            return
-        readfds = [self.sock] if (blockdir & 01) else []
-        writefds = [self.sock] if (blockdir & 02) else []
-        select(readfds, writefds, [])
-        return
-    
-    def exec_command(self, command, sudo=False, user=None,
-                     **kwargs):
-        channel = self.session.open_session()
-        while not channel:
-            self._wait_select()
-            channel = self.session.open_session()
-        # channel.setblocking = 0
-        return WrapperChannel(channel), self.host, self.execute(channel, command), None
-
-    def __del__(self):
-        self.session.close()
-
-# list(client.execute(client.session.open_session(), 'ls -ltrh'))
