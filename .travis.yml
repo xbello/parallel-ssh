@@ -1,22 +1,36 @@
 language: python
 cache: pip
 sudo: false
-cache: pip
+notifications:
+  email: false
 python:
   - 2.6
   - 2.7
   - 3.4
   - 3.5
+  - 3.6
+matrix:
+  allow_failures:
+    - python: 2.6
+before_install:
+  - pip install -U pip setuptools
 install:
-  - pip install -r requirements.txt
-  - pip install coveralls
+  - pip install -r requirements_dev.txt
 script:
-  - python setup.py nosetests --with-coverage --cover-package=pssh
-  # If using py3, run 2to3 on embedded server and tests and run nosetests for new test dir
-  - python -c 'import sys; sys.version_info >= (3,) and sys.exit(1)' || eval "2to3 -nw embedded_server/*.py && 2to3 tests/*.py -o tests3 -nw && cp tests/test_client_private_key* tests3/ && python setup.py nosetests -w tests3 --with-coverage --cover-package=pssh"
-notifications:
-  email:
-    on_failure: change
+  - nosetests --with-coverage --cover-package=pssh
+  - flake8 pssh
+  - cd doc; make html
+before_deploy:
+  - cd $TRAVIS_BUILD_DIR
 after_success:
   - coveralls
-sudo: false
+deploy:
+  provider: pypi
+  user: pkittenis
+  password:
+    secure: ZQJ41Nguc7Y5XHvtN8lITIiW1S1jvy0p50rssMUJpa9wVZIh0HcW0K/Xv2v17fDNuOvQlVbsF0sY/BmcRfH7c7nzwt7fRXGOjXbZk5djqwusKXL6zlVN7OKjAY6j2EByOjD9UpDDkB5tDqb4lRBCX87wknii/t+7/8P0ddoBojM=
+  on:
+    tags: true
+    repo: ParallelSSH/parallel-ssh
+  distributions: sdist bdist_wheel
+  skip_upload_docs: true

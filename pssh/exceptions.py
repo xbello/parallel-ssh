@@ -1,6 +1,6 @@
 # This file is part of parallel-ssh.
 
-# Copyright (C) 2014- Panos Kittenis
+# Copyright (C) 2014-2017 Panos Kittenis
 
 # This library is free software; you can redistribute it and/or
 # modify it under the terms of the GNU Lesser General Public
@@ -36,4 +36,9 @@ class AuthenticationException(Exception):
 
 class SSHException(Exception):
     """Raised on SSHException error - error authenticating with SSH server"""
+    pass
+
+
+class HostArgumentException(Exception):
+    """Raised on errors with per-host command arguments"""
     pass

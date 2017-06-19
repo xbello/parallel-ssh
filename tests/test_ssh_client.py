@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 
 # This file is part of parallel-ssh.
 
@@ -26,17 +27,24 @@ import time
 import shutil
 import unittest
 from pssh import SSHClient, ParallelSSHClient, UnknownHostException, AuthenticationException,\
-     logger, ConnectionErrorException, UnknownHostException, SSHException
+     logger, ConnectionErrorException, UnknownHostException, SSHException, utils
 from embedded_server.embedded_server import start_server, make_socket, logger as server_logger, \
      paramiko_logger
-from embedded_server.fake_agent import FakeAgent
+from pssh.agent import SSHAgent
 import paramiko
 import os
 from test_pssh_client import USER_KEY
 import random, string
+import tempfile
 
-USER_KEY = paramiko.RSAKey.from_private_key_file(
-    os.path.sep.join([os.path.dirname(__file__), 'test_client_private_key']))
+
+try:
+    xrange
+except NameError:
+    xrange = range
+
+USER_KEY_PATH = os.path.sep.join([os.path.dirname(__file__), 'test_client_private_key'])
+USER_KEY = paramiko.RSAKey.from_private_key_file(USER_KEY_PATH)
 
 class SSHClientTest(unittest.TestCase):
 
@@ -108,6 +116,16 @@ class SSHClientTest(unittest.TestCase):
         shutil.rmtree(remote_dir)
         del client
 
+    def test_sftp_exceptions(self):
+        self.server.kill()
+        # Make socket with no server listening on it on separate ip
+        host = '127.0.0.3'
+        _socket = make_socket(host)
+        port = _socket.getsockname()[1]
+        self.assertRaises(ConnectionErrorException, SSHClient,
+                          host, port=port, num_retries=1)
+        del _socket
+    
     def test_ssh_client_sftp(self):
         """Test SFTP features of SSHClient. Copy local filename to server,
         check that data in both files is the same, make new directory on
@@ -141,7 +159,7 @@ not match source %s" % (copied_file_data, test_file_data))
             os.rmdir(dirpath)
         del client
 
-    def test_ssh_client_directory(self):
+    def test_ssh_client_local_directory(self):
         """Tests copying directories with SSH client. Copy all the files from
         local directory to server, then make sure they are all present."""
         test_file_data = 'test'
@@ -168,6 +186,44 @@ not match source %s" % (copied_file_data, test_file_data))
             self.assertTrue(os.path.isfile(path))
         shutil.rmtree(local_test_path)
         shutil.rmtree(remote_test_path)
+
+    def test_ssh_client_copy_remote_directory(self):
+        """Tests copying a remote directory to the localhost"""
+        remote_test_directory = 'remote_test_dir'
+        local_test_directory = 'local_test_dir'
+        for path in [remote_test_directory, local_test_directory]:
+            try:
+                shutil.rmtree(path)
+            except OSError:
+                pass
+        os.mkdir(remote_test_directory)
+        test_files = []
+        test_file_data = 'test'
+        for i in range(0, 10):
+            file_name = 'foo' + str(i)
+            test_files.append(file_name)
+            file_path = os.path.join(remote_test_directory, file_name)
+            test_file = open(file_path, 'w')
+            test_file.write(test_file_data)
+            test_file.close()
+        client = SSHClient(self.host, port=self.listen_port,
+                           pkey=self.user_key)
+        try:
+            self.assertRaises(ValueError, client.copy_remote_file, remote_test_directory, local_test_directory)
+            client.copy_remote_file(remote_test_directory, local_test_directory, recurse=True)
+            for test_file in test_files:
+                file_path = os.path.join(local_test_directory, test_file)
+                self.assertTrue(os.path.isfile(file_path))
+                copied_file = open(file_path, 'r')
+                copied_file_data = copied_file.read().strip()
+                copied_file.close()
+                self.assertEqual(test_file_data, copied_file_data,
+                                 msg="Data in destination file %s does "
+                                 "not match source %s" % (
+                                     copied_file_data, test_file_data))
+        finally:
+            shutil.rmtree(remote_test_directory)
+            shutil.rmtree(local_test_directory)
 
     def test_ssh_client_directory_no_recurse(self):
         """Tests copying directories with SSH client. Copy all the files from
@@ -200,17 +256,20 @@ not match source %s" % (copied_file_data, test_file_data))
         instead override the client's agent with our own fake SSH agent,
         add our to key to agent and try to login to server.
         Key should be automatically picked up from the overriden agent"""
-        agent = FakeAgent()
+        agent = SSHAgent()
         agent.add_key(USER_KEY)
         client = SSHClient(self.host, port=self.listen_port,
                            agent=agent)
-        channel, host, stdout, stderr = client.exec_command(self.fake_cmd)
-        output = list(stdout)
-        stderr = list(stderr)
+        channel, host, stdout, stderr, stdin = client.exec_command(self.fake_cmd)
+        output = list(client.read_output_buffer(stdout))
+        stderr = list(client.read_output_buffer(stderr))
         expected = [self.fake_resp]
         self.assertEqual(expected, output,
-                         msg = "Got unexpected command output - %s" % (output,))
+                         msg="Got unexpected command output - %s" % (output,))
         del client
+        agent._connect(None)
+        agent._close()
+        del agent
 
     def test_ssh_client_conn_failure(self):
         """Test connection error failure case - ConnectionErrorException"""
@@ -247,23 +306,36 @@ not match source %s" % (copied_file_data, test_file_data))
         del channel
         del client
 
-    def test_ssh_client_pty(self):
+    def test_ssh_client_utf_encoding(self):
+        """Test that unicode output works"""
+        client = SSHClient(self.host, port=self.listen_port,
+                           pkey=self.user_key)
+        expected = [u'é']
+        cmd = u"echo 'é'"
+        channel, host, stdout, stderr, stdin = client.exec_command(cmd)
+        output = list(client.read_output_buffer(stdout))
+        self.assertEqual(expected, output,
+                         msg="Got unexpected unicode output %s - expected %s" % (
+                             output, expected,))
+        del client
+
+    def test_ssh_client_shell(self):
         """Test that running command sans shell works as expected
         and that shell commands fail accordingly"""
         client = SSHClient(self.host, port=self.listen_port,
                            pkey=self.user_key)
-        channel, host, stdout, stderr = client.exec_command(self.fake_cmd, use_shell=False)
-        output = list(stdout)
+        channel, host, stdout, stderr, stdin = client.exec_command(self.fake_cmd, use_shell=False)
+        output = list(client.read_output_buffer(stdout))
         stderr = list(stderr)
         expected = []
         exit_code = channel.recv_exit_status()
         self.assertEqual(expected, output,
                          msg = "Got unexpected command output - %s" % (output,))
-        self.assertTrue(exit_code==127,
+        self.assertTrue(exit_code == 127,
                         msg="Expected cmd not found error code 127, got %s instead" % (
                             exit_code,))
-        channel, host, stdout, stderr = client.exec_command('id', use_shell=False)
-        output = list(stdout)
+        channel, host, stdout, stderr, stdin = client.exec_command('id', use_shell=False)
+        output = list(client.read_output_buffer(stdout))
         exit_code = channel.recv_exit_status()
         self.assertTrue(output,
                         msg="Got no output from cmd executed without shell")
@@ -271,6 +343,42 @@ not match source %s" % (copied_file_data, test_file_data))
                         msg="Cmd executed with shell failed with error code %s" % (
                             exit_code,))
         del client
+
+    def test_openssh_config(self):
+        """Test reading and using OpenSSH config file"""
+        config_file = tempfile.NamedTemporaryFile()
+        _host = "127.0.0.2"
+        _user = "config_user"
+        _listen_socket = make_socket(_host)
+        _server = start_server(_listen_socket)
+        _port = _listen_socket.getsockname()[1]
+        _key = USER_KEY_PATH
+        content = [("""Host %s\n""" % (_host,)),
+                   ("""  User %s\n""" % (_user,)),
+                   ("""  Port %s\n""" % (_port,)),
+                   ("""  IdentityFile %s\n""" % (_key,)),
+                   ]
+        config_file.writelines([s.encode('utf-8') for s in content])
+        config_file.flush()
+        host, user, port, pkey = utils.read_openssh_config(
+            _host, config_file=config_file.name)
+        client = SSHClient(_host, _openssh_config_file=config_file.name)
+        config_file.close()
+        self.assertEqual(host, _host)
+        self.assertEqual(user, _user)
+        self.assertEqual(port, _port)
+        self.assertTrue(pkey)
+        self.assertEqual(client.host, _host)
+        self.assertEqual(client.user, _user)
+        self.assertEqual(client.port, _port)
+        self.assertTrue(client.pkey)
+        del _server, _listen_socket
+
+    def test_openssh_config_missing(self):
+        client = SSHClient(self.host, port=self.listen_port,
+                           pkey=self.user_key,
+                           _openssh_config_file='fake', num_retries=1)
+        self.assertTrue(client)
 
 if __name__ == '__main__':
     unittest.main()
