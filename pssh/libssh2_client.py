@@ -52,13 +52,13 @@ class WrapperChannel(libssh2.Channel):
 
 
 class SSHClient(object):
-    """Low level libssh2 based SSH client"""
+    """Libssh2 based SSH client"""
 
     LIBSSH2_ERROR_EAGAIN = -37
     IDENTITIES = [
-        '~/.ssh/id_dsa',
-        '~/.ssh/id_rsa',
-        '~/.ssh/identity'
+        os.path.expanduser('~/.ssh/id_rsa'),
+        os.path.expanduser('~/.ssh/id_dsa'),
+        os.path.expanduser('~/.ssh/identity')
     ]
 
     def __init__(self, host,
@@ -73,16 +73,31 @@ class SSHClient(object):
         self.private_key_file = private_key_file
         # self.forward_ssh_agent = forward_ssh_agent
         self.num_retries = num_retries
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setblocking(1)
-        self.sock.connect_ex((self.host, self.port))
-        self.sock.setblocking(0)
         self.session = libssh2.Session()
         self.session.setblocking(0)
+        self._connect()
         self.tp = ThreadPool(1)
         self.startup()
         self.auth()
         self.channel = self.open_channel()
+
+    def _connect(self, retries=1):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setblocking(1)
+        try:
+            self.sock.connect((self.host, self.port))
+        except sock_error as ex:
+            logger.error("Error connecting to host '%s:%s' - retry %s/%s",
+                         self.host, self.port, retries, self.num_retries)
+            while retries < self.num_retries:
+                sleep(5)
+                return self._connect(retries=retries+1)
+            error_type = ex.args[1] if len(ex.args) > 1 else ex.args[0]
+            raise ConnectionErrorException(
+                "Error connecting to host '%s:%s' - %s - retry %s/%s",
+                self.host, self.port, str(error_type), retries,
+                self.num_retries,)
+        self.sock.setblocking(0)
 
     def startup(self):
         return self._eagain(self.session.startup, self.sock)
@@ -90,23 +105,22 @@ class SSHClient(object):
     def _agent_auth(self):
         self.session.setblocking(1)
         self.tp.apply(self.session.userauth_agent, args=(self.user,))
+        # self.session.userauth_agent(self.user)
         self.session.setblocking(0)
 
     def _identity_auth(self):
         for identity_file in self.IDENTITIES:
-            pk_file = os.path.expanduser(identity_file)
-            if not os.path.isfile(pk_file):
+            if not os.path.isfile(identity_file):
                 continue
             pub_file = "%s.pub" % (identity_file)
-            pub_file = os.path.expanduser(pub_file)
             try:
-                if not self._eagain(self.session.userauth_publickey_fromfile,
-                                    self.user,
-                                    pub_file,
-                                    pk_file,
-                                    self.password):
-                    continue
-            except Exception as ex:
+                self._eagain(
+                    self.session.userauth_publickey_fromfile,
+                    self.user,
+                    pub_file,
+                    identity_file,
+                    self.password if self.password is not None else '')
+            except Exception:
                 logger.debug("Authentication with identity file %s failed, "
                              "continuing with other identities",
                              identity_file)
@@ -156,25 +170,33 @@ class SSHClient(object):
             ret = func(*args, **kwargs)
         return ret
 
-    def execute(self, channel, cmd):
-        channel.execute(cmd)
+    def _execute(self, cmd):
+        try:
+            self._eagain(self.channel.execute, cmd)
+        except Exception as ex:
+            if '-22' in ex.message:
+                logger.debug("Channel closed - opening new channel")
+                self.channel = self.open_channel()
+                self._eagain(self.channel.execute, cmd)
+
+    def execute(self, cmd):
+        self._execute(cmd)
         remainder = ""
-        while not channel.eof():
+        while not self.channel.eof():
             self._wait_select()
-            _size, _data = channel.read_ex()
-            if _size == 0 or _data is None:
-                break
+            _size, _data = self._eagain(self.channel.read_ex)
             _pos = 0
             _data = remainder + _data
-            while _pos < _size:
-                linesep = _data.find(os.linesep, _pos)
-                if linesep > 0:
-                    yield _data[_pos:linesep].strip()
-                    _pos = linesep + 1
-                else:
-                    remainder = _data[_pos:]
-                    break
-        # channel.close()
+            while _size > 0:
+                while _pos < _size:
+                    linesep = _data.find(os.linesep, _pos)
+                    if linesep > 0:
+                        yield _data[_pos:linesep].strip()
+                        _pos = linesep + 1
+                    else:
+                        remainder = _data[_pos:]
+                        break
+                _size, data = self.channel.read_ex()
 
     def _wait_select(self):
         """
@@ -194,6 +216,4 @@ class SSHClient(object):
         if use_pty:
             self._eagain(self.channel.pty)
         return WrapperChannel(self.channel), self.host, \
-            self.execute(self.channel, command), iter([])
-
-# list(client.execute(client.session.open_session(), 'ls -ltrh'))
+            self.execute(command), iter([])

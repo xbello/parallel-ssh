@@ -37,4 +37,6 @@ class LibSSH2ClientTest(unittest.TestCase):
         output = list(stdout)
         stderr = list(stderr)
         expected = [self.fake_resp]
+        exit_code = channel.exit_status()
+        self.assertEqual(exit_code, 0)
         self.assertEqual(expected, output)
