@@ -27,7 +27,7 @@ from gevent import sleep
 from gevent.select import select
 from gevent import socket
 from gevent.threadpool import ThreadPool
-import libssh2
+from pssh_libssh2 import libssh2
 
 from .exceptions import UnknownHostException, AuthenticationException, \
      ConnectionErrorException, SSHException
