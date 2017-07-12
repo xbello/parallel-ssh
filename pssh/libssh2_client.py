@@ -26,7 +26,6 @@ from socket import gaierror as sock_gaierror, error as sock_error
 from gevent import sleep
 from gevent.select import select
 from gevent import socket
-from gevent.threadpool import ThreadPool
 from pssh_libssh2 import libssh2
 
 from .exceptions import UnknownHostException, AuthenticationException, \
@@ -34,27 +33,13 @@ from .exceptions import UnknownHostException, AuthenticationException, \
 from .constants import DEFAULT_RETRIES
 
 host_logger = logging.getLogger('pssh.host_logger')
-logger = logging.getLogger('pssh')
+logger = logging.getLogger(__name__)
 
-
-class WrapperChannel(libssh2.Channel):
-    """Wrapper class over :mod:`libssh2.Channel` with functions for getting
-    exit status"""
-
-    def __init__(self, _channel):
-        libssh2.Channel.__init__(self, _channel)
-
-    def exit_status_ready(self):
-        return True if self.exit_status() else False
-
-    def recv_exit_status(self):
-        return self.exit_status()
-
+LIBSSH2_ERROR_EAGAIN = -37
 
 class SSHClient(object):
     """Libssh2 based SSH client"""
 
-    LIBSSH2_ERROR_EAGAIN = -37
     IDENTITIES = [
         os.path.expanduser('~/.ssh/id_rsa'),
         os.path.expanduser('~/.ssh/id_dsa'),
@@ -63,26 +48,28 @@ class SSHClient(object):
 
     def __init__(self, host,
                  user=None, password=None, port=None,
-                 private_key_file=None, # forward_ssh_agent=True,
-                 num_retries=DEFAULT_RETRIES): # agent=None, timeout=10,
-                 # proxy_host=None, proxy_port=22):
+                 pkey=None, forward_ssh_agent=None,
+                 num_retries=DEFAULT_RETRIES, agent=None,
+                 allow_agent=True, timeout=10,
+                 proxy_host=None, proxy_port=22, proxy_user=None, 
+                 proxy_password=None, proxy_pkey=None, channel_timeout=None,
+                 _openssh_config_file=None):
         self.host = host
         self.user = user if user else pwd.getpwuid(os.getuid()).pw_name
         self.password = password
         self.port = port if port else 22
-        self.private_key_file = private_key_file
+        self.pkey = pkey
+        self.session = libssh2.Session()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # self.forward_ssh_agent = forward_ssh_agent
         self.num_retries = num_retries
-        self.session = libssh2.Session()
         self.session.setblocking(0)
         self._connect()
-        self.tp = ThreadPool(1)
         self.startup()
         self.auth()
         self.channel = self.open_channel()
 
     def _connect(self, retries=1):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setblocking(1)
         try:
             self.sock.connect((self.host, self.port))
@@ -104,9 +91,17 @@ class SSHClient(object):
 
     def _agent_auth(self):
         self.session.setblocking(1)
-        self.tp.apply(self.session.userauth_agent, args=(self.user,))
-        # self.session.userauth_agent(self.user)
+        self.session.userauth_agent(self.user)
         self.session.setblocking(0)
+
+    def _pkey_auth(self):
+        pub_file = "{}.pub".format(self.pkey)
+        self._eagain(
+            self.session.userauth_publickey_fromfile,
+            self.user,
+            pub_file,
+            self.pkey,
+            self.password if self.password is not None else '')
 
     def _identity_auth(self):
         for identity_file in self.IDENTITIES:
@@ -132,6 +127,8 @@ class SSHClient(object):
         raise AuthenticationException("No authentication methods succeeded")
 
     def auth(self):
+        if self.pkey is not None:
+            return self._pkey_auth()
         try:
             self._agent_auth()
         except Exception as ex:
@@ -153,50 +150,77 @@ class SSHClient(object):
     def __del__(self):
         self._eagain(self.session.close)
 
-    def _run_with_retries(self, func, count=0, *args, **kwargs):
-        while func(*args, **kwargs) == self.LIBSSH2_ERROR_EAGAIN:
+    def _run_with_retries(self, func, count=1, *args, **kwargs):
+        while func(*args, **kwargs) == LIBSSH2_ERROR_EAGAIN:
             if count > self.num_retries:
                 raise AuthenticationException(
                     "Error authenticating %s@%s", self.user, self.host,)
             count += 1
 
-    def get_transport(self):
-        return self.session
-
-    def _eagain(self, func, *args, **kwargs):
-        ret = func(*args, **kwargs)
-        while ret == self.LIBSSH2_ERROR_EAGAIN:
-            self._wait_select()
-            ret = func(*args, **kwargs)
-        return ret
-
-    def _execute(self, cmd):
+    def _execute(self, cmd, use_pty=True):
+        if self.channel.closed:
+            logger.debug("Channel closed - opening new channel")
+            self.channel = self.open_channel()
         try:
+            if use_pty:
+                self._eagain(self.channel.pty)
             self._eagain(self.channel.execute, cmd)
         except Exception as ex:
             if '-22' in ex.message:
                 logger.debug("Channel closed - opening new channel")
                 self.channel = self.open_channel()
                 self._eagain(self.channel.execute, cmd)
+            else:
+                raise
+        sleep()
 
-    def execute(self, cmd):
-        self._execute(cmd)
-        remainder = ""
-        while not self.channel.eof():
+    def finished(self):
+        return self.channel.closed and self.channel.eof()
+
+    def join(self):
+        # import ipdb; ipdb.set_trace()
+        self._wait_select()
+        self._eagain(self.channel.wait_eof)
+        # import ipdb; ipdb.set_trace()
+        # TODO - poll select to see if there is data to be read
+        # import ipdb; ipdb.set_trace()
+        # if self.channel.closed:
+        #     return
+        if not self.finished():
             self._wait_select()
-            _size, _data = self._eagain(self.channel.read_ex)
-            _pos = 0
-            _data = remainder + _data
-            while _size > 0:
-                while _pos < _size:
-                    linesep = _data.find(os.linesep, _pos)
-                    if linesep > 0:
-                        yield _data[_pos:linesep].strip()
-                        _pos = linesep + 1
-                    else:
-                        remainder = _data[_pos:]
-                        break
-                _size, data = self.channel.read_ex()
+            self._eagain(self.channel.wait_eof)
+            self.channel.close()
+        sleep()
+
+    def read_output(self):
+        self._wait_select()
+        _size, _data = self._eagain(self.channel.read_ex)
+        _pos = 0
+        while _size > 0:
+            while _pos < _size:
+                linesep = _data.find(os.linesep, _pos)
+                if linesep > 0:
+                    yield _data[_pos:linesep].strip()
+                    _pos = linesep + 1
+                else:
+                    yield _data[_pos:]
+                    break
+            _size, data = self._eagain(self.channel.read_ex)
+        sleep()
+
+    def read_stderr(self):
+        data = self._eagain(self.channel.read_stderr)
+        if data is not None:
+            for line in data.splitlines():
+                line.strip()
+                yield line
+
+    def _eagain(self, func, *args, **kwargs):
+        ret = func(*args, **kwargs)
+        while ret == LIBSSH2_ERROR_EAGAIN:
+            self._wait_select()
+            ret = func(*args, **kwargs)
+        return ret
 
     def _wait_select(self):
         """
@@ -211,9 +235,32 @@ class SSHClient(object):
         writefds = [self.sock] if (blocked & 02) else ()
         select(readfds, writefds, [])
 
+    def read_output_buffer(self, output_buffer, prefix='',
+                           callback=None,
+                           callback_args=None,
+                           encoding='utf-8'):
+        """Read from output buffers and log to host_logger
+
+        :param output_buffer: Iterator containing buffer
+        :type output_buffer: iterator
+        :param prefix: String to prefix log output to ``host_logger`` with
+        :type prefix: str
+        :param callback: Function to call back once buffer is depleted:
+        :type callback: function
+        :param callback_args: Arguments for call back function
+        :type callback_args: tuple
+        """
+        for line in output_buffer:
+            output = line.decode(encoding)
+            host_logger.info("[%s]%s\t%s", self.host, prefix, output,)
+            yield output
+        if callback:
+            callback(*callback_args)
+
     def exec_command(self, command, sudo=False, user=None,
-                     use_pty=True):
-        if use_pty:
-            self._eagain(self.channel.pty)
-        return WrapperChannel(self.channel), self.host, \
-            self.execute(command), iter([])
+                     use_pty=True, use_shell=True, shell=None):
+        self._execute(command, use_pty=use_pty)
+        return self.channel, self.host, \
+            self.read_output(), \
+            iter([]), \
+            self.channel
