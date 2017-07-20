@@ -30,7 +30,7 @@ class LibSSH2ClientTest(unittest.TestCase):
     def test_execute(self):
         channel, host, stdout, stderr, stdin = self.client.exec_command(
             self.fake_cmd)
-        self.client.join()
+        # self.client.join()
         output = list(stdout)
         stderr = list(stderr)
         expected = [self.fake_resp]
@@ -41,6 +41,6 @@ class LibSSH2ClientTest(unittest.TestCase):
     def test_stderr(self):
         channel, host, stdout, stderr, stdin = self.client.exec_command(
             'echo "me" >&2')
-        self.client.join()
+        # self.client.join()
         output = list(stdout)
         stderr = list(stderr)

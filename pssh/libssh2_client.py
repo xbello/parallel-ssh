@@ -174,39 +174,29 @@ class SSHClient(object):
                 raise
         sleep()
 
-    def finished(self):
-        return self.channel.closed and self.channel.eof()
-
     def join(self):
-        # import ipdb; ipdb.set_trace()
-        self._wait_select()
-        self._eagain(self.channel.wait_eof)
-        # import ipdb; ipdb.set_trace()
-        # TODO - poll select to see if there is data to be read
-        # import ipdb; ipdb.set_trace()
-        # if self.channel.closed:
-        #     return
-        if not self.finished():
-            self._wait_select()
-            self._eagain(self.channel.wait_eof)
-            self.channel.close()
-        sleep()
+        raise NotImplementedError
 
     def read_output(self):
-        self._wait_select()
-        _size, _data = self._eagain(self.channel.read_ex)
-        _pos = 0
-        while _size > 0:
-            while _pos < _size:
-                linesep = _data.find(os.linesep, _pos)
-                if linesep > 0:
-                    yield _data[_pos:linesep].strip()
-                    _pos = linesep + 1
-                else:
-                    yield _data[_pos:]
-                    break
-            _size, data = self._eagain(self.channel.read_ex)
-        sleep()
+        while not self.channel.eof():
+            remainder = ""
+            self._wait_select()
+            _pos = 0
+            _size, _data = self._eagain(self.channel.read_ex)
+            while _size > 0:
+                while _pos < _size:
+                    linesep = _data.find(os.linesep, _pos)
+                    if linesep > 0:
+                        if len(remainder) > 0:
+                            yield remainder + _data[_pos:linesep].strip()
+                            remainder = ""
+                        else:
+                            yield _data[_pos:linesep].strip()
+                        _pos = linesep + 1
+                    else:
+                        remainder += _data[_pos:]
+                        break
+                _size, _data = self._eagain(self.channel.read_ex)
 
     def read_stderr(self):
         data = self._eagain(self.channel.read_stderr)
