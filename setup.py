@@ -28,8 +28,7 @@ setup(name='parallel-ssh',
       author='Panos Kittenis',
       author_email='22e889d8@opayq.com',
       url="https://github.com/ParallelSSH/parallel-ssh",
-      packages=find_packages('.', exclude=(
-          'embedded_server', 'embedded_server.*')),
+      packages=find_packages('.'),
       install_requires=['paramiko<2', gevent_req],
       classifiers=[
         'License :: OSI Approved :: GNU Lesser General Public License v2 (LGPLv2)',
