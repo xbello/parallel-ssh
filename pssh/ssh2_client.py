@@ -26,9 +26,9 @@ from socket import gaierror as sock_gaierror, error as sock_error
 from gevent import sleep
 from gevent.select import select
 from gevent import socket
-from ssh2.session import Session
-from ssh2.error_codes import LIBSSH2_SESSION_BLOCK_INBOUND, \
-    LIBSSH2_SESSION_BLOCK_OUTBOUND, LIBSSH2_ERROR_EAGAIN
+from ssh2.session import Session, LIBSSH2_SESSION_BLOCK_INBOUND, \
+    LIBSSH2_SESSION_BLOCK_OUTBOUND
+from ssh2.error_codes import LIBSSH2_ERROR_EAGAIN
 from ssh2.exceptions import AuthenticationError, AgentError, ChannelError
 
 from .exceptions import UnknownHostException, AuthenticationException, \
@@ -68,7 +68,7 @@ class SSHClient(object):
         self._connect()
         self.handshake()
         self.auth()
-        self.session.setblocking(0)
+        self.session.set_blocking(0)
 
     def _connect(self, retries=1):
         try:
@@ -171,7 +171,7 @@ class SSHClient(object):
                     "Error authenticating %s@%s", self.user, self.host,)
             count += 1
 
-    def _execute(self, cmd, use_pty=False):
+    def execute(self, cmd, use_pty=False):
         logger.debug("Opening new channel for execute")
         channel = self.open_channel()
         if use_pty:
@@ -179,14 +179,20 @@ class SSHClient(object):
         self._eagain(channel.execute, cmd)
         return channel
 
+    def read_stderr(self, channel):
+        return self._read_output(channel, channel.read_stderr)
+
     def read_output(self, channel):
+        return self._read_output(channel, channel.read)
+
+    def _read_output(self, channel, read_func):
         remainder = ""
         _pos = 0
-        _size, _data = channel.read()
+        _size, _data = read_func()
         while _size == LIBSSH2_ERROR_EAGAIN:
             logger.debug("Waiting on socket read")
             self._wait_select()
-            _size, _data = channel.read()
+            _size, _data = read_func()
         while _size > 0:
             logger.debug("Got data size %s", _size)
             while _pos < _size:
@@ -201,16 +207,9 @@ class SSHClient(object):
                 else:
                     remainder += _data[_pos:]
                     break
-            _size, _data = channel.read()
+            _size, _data = read_func()
             _pos = 0
         self._eagain(channel.close)
-
-    def read_stderr(self, channel):
-        data = self._eagain(channel.read_stderr)
-        if data is not None:
-            for line in data.splitlines():
-                line.strip()
-                yield line
 
     def wait_finished(self, channel):
         """Wait for EOF from channel, close channel and wait for
@@ -239,13 +238,13 @@ class SSHClient(object):
 
         Return immediately if libssh2 is not blocked.
         """
-        directions = self.session.blockdirections()
+        directions = self.session.block_directions()
         if directions == 0:
             return
         readfds = [self.sock] \
-                  if (directions & LIBSSH2_SESSION_BLOCK_INBOUND) else ()
+            if (directions & LIBSSH2_SESSION_BLOCK_INBOUND) else ()
         writefds = [self.sock] \
-                   if (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) else ()
+            if (directions & LIBSSH2_SESSION_BLOCK_OUTBOUND) else ()
         select(readfds, writefds, [], 1)
 
     def read_output_buffer(self, output_buffer, prefix='',
@@ -270,9 +269,10 @@ class SSHClient(object):
         if callback:
             callback(*callback_args)
 
-    def execute(self, command, sudo=False, user=None,
-                use_pty=False, use_shell=True, shell=None):
-        channel = self._execute(command, use_pty=use_pty)
+    def run_command(self, command, sudo=False, user=None,
+                    use_pty=False, use_shell=True, shell=None):
+        channel = self.execute(command, use_pty=use_pty)
         return channel, self.host, \
             self.read_output(channel), \
-            iter([]), None
+            self.read_stderr(channel), \
+            iter([])
